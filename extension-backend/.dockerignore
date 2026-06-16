@@ -1,0 +1,41 @@
+# Ignore node_modules
+node_modules
+
+# Ignore build output (will be created during build)
+dist
+
+# Ignore development files
+.env*
+.git
+.gitignore
+*.md
+*.log
+
+# Ignore IDE/editor files
+.vscode
+.idea
+*.swp
+*.swo
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore test files
+**/*.test.*
+**/*.spec.*
+__tests__
+coverage
+
+# Ignore documentation
+docs
+
+# Ignore CI/CD files
+.github
+.gitlab-ci.yml
+.travis.yml
+
+# Ignore Docker files (except the main Dockerfile)
+docker-compose*.yml
+*.dockerfile
+Dockerfile.*

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.2.2/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "formatWithErrors": false
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "correctness": {
+        "noUnusedVariables": "error",
+        "noUnusedImports": "error"
+      },
+      "suspicious": {
+        "noDebugger": "error",
+        "noExplicitAny": "error",
+        "noAsyncPromiseExecutor": "error"
+      },
+      "style": {
+        "useConst": "error",
+        "useBlockStatements": "error",
+        "useTemplate": "warn",
+        "useFilenamingConvention": {
+          "level": "error",
+          "options": {
+            "filenameCases": [
+              "kebab-case",
+              "snake_case"
+            ]
+          }
+        }
+      },
+      "complexity": {
+        "noExcessiveCognitiveComplexity": {
+          "level": "warn",
+          "options": {
+            "maxAllowedComplexity": 15
+          }
+        }
+      },
+      "performance": {
+        "noDelete": "warn"
+      },
+      "a11y": {
+        "useButtonType": "warn",
+        "noSvgWithoutTitle": "warn"
+      }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "asNeeded",
+      "trailingCommas": "es5",
+      "arrowParentheses": "asNeeded"
+    },
+    "globals": [
+      "Prisma",
+      "Hono"
+    ]
+  },
+  "files": {
+    "includes": [
+      "./src/**",
+      "tests"
+    ]
+  }
+}

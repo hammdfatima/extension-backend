@@ -1,0 +1,24 @@
+# Render Blueprint — deploy from repo root with root directory: extension-backend
+# Or place this file in the service root if deploying extension-backend as its own repo.
+
+services:
+  - type: web
+    name: text-extension-api
+    runtime: bun
+    region: oregon
+    plan: free
+    rootDir: extension-backend
+    buildCommand: bun install && bunx prisma generate && bunx prisma migrate deploy
+    startCommand: bun run src/index.ts
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: BETTER_AUTH_SECRET
+        generateValue: true
+      - key: BETTER_AUTH_URL
+        sync: false
+      - key: UPLOAD_DIR
+        value: ./uploads

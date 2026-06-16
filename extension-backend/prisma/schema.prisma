@@ -1,0 +1,73 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+generator zod {
+  provider = "prisma-zod-generator"
+  output   = "../src/zod"
+  config   = "../zod.config.json"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  name      String?
+  password  String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  meetings  Meeting[]
+}
+
+enum MeetingStatus {
+  ACTIVE
+  COMPLETED
+}
+
+model Meeting {
+  id        String              @id @default(cuid())
+  userId    String?
+  title     String?
+  status    MeetingStatus       @default(ACTIVE)
+  startedAt DateTime            @default(now())
+  endedAt   DateTime?
+  audioPath String?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  user      User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  segments  TranscriptSegment[]
+  note      Note?
+
+  @@index([userId])
+  @@index([status])
+}
+
+model TranscriptSegment {
+  id        String   @id @default(cuid())
+  meetingId String
+  text      String
+  isFinal   Boolean  @default(true)
+  speaker   String?
+  startMs   Int?
+  endMs     Int?
+  createdAt DateTime @default(now())
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId])
+}
+
+model Note {
+  id        String   @id @default(cuid())
+  meetingId String   @unique
+  title     String?
+  summary   String?
+  content   String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  meeting   Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+}

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tab + Mic Recorder</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      overflow: hidden;
+    }
+
+    body {
+      width: 380px;
+      max-height: 600px;
+      margin: 0;
+      padding: 16px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      color: #1a1a1a;
+      background: #fafafa;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      font-size: 13px;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #9e9e9e;
+    }
+
+    .status[data-state="recording"] .status-dot {
+      background: #e53935;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    .status[data-state="saving"] .status-dot,
+    .status[data-state="syncing"] .status-dot,
+    .status[data-state="generating"] .status-dot {
+      background: #fb8c00;
+    }
+
+    .status[data-state="idle"] .status-dot,
+    .status[data-state="ready"] .status-dot,
+    .status[data-state="notes"] .status-dot,
+    .status[data-state="saved"] .status-dot {
+      background: #43a047;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    button {
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    #startBtn,
+    #generateNotesBtn,
+    #saveNotesBtn,
+    #startNewRecordingBtn {
+      background: #1a73e8;
+      color: #fff;
+    }
+
+    #startBtn:hover:not(:disabled),
+    #generateNotesBtn:hover:not(:disabled),
+    #saveNotesBtn:hover:not(:disabled),
+    #startNewRecordingBtn:hover:not(:disabled) {
+      background: #1557b0;
+    }
+
+    #stopBtn {
+      background: #fff;
+      color: #c62828;
+      border: 1px solid #ef9a9a;
+    }
+
+    #stopBtn:hover:not(:disabled) {
+      background: #ffebee;
+    }
+
+    #dismissSessionBtn {
+      background: #fff;
+      color: #424242;
+      border: 1px solid #e0e0e0;
+    }
+
+    #dismissSessionBtn:hover:not(:disabled) {
+      background: #f5f5f5;
+    }
+
+    .error {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #ffebee;
+      color: #b71c1c;
+      font-size: 12px;
+      line-height: 1.4;
+      display: none;
+    }
+
+    .error.visible {
+      display: block;
+    }
+
+    .hint {
+      margin-top: 12px;
+      font-size: 11px;
+      color: #757575;
+      line-height: 1.4;
+    }
+
+    .session-panel {
+      display: none;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #e0e0e0;
+    }
+
+    .session-panel.visible {
+      display: block;
+    }
+
+    .session-panel h2 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .session-panel label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #424242;
+    }
+
+    .session-panel textarea {
+      display: block;
+      width: 100%;
+      margin-bottom: 10px;
+      padding: 10px;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 12px;
+      line-height: 1.5;
+      overflow: hidden;
+      resize: none;
+      field-sizing: content;
+      min-height: 2.5rem;
+      background: #fff;
+    }
+
+    #notesContent {
+      min-height: 12rem;
+    }
+
+    .notes-block {
+      display: none;
+    }
+
+    .notes-block.visible {
+      display: block;
+    }
+
+    .notes-summary {
+      margin: 0 0 10px;
+      font-size: 12px;
+      color: #616161;
+      line-height: 1.5;
+    }
+
+    .session-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .save-status {
+      min-height: 16px;
+      font-size: 11px;
+      color: #2e7d32;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <h1>Tab + Mic Recorder</h1>
+
+  <div id="status" class="status" data-state="idle">
+    <span class="status-dot" aria-hidden="true"></span>
+    <span id="statusText">Idle</span>
+  </div>
+
+  <div id="recordingButtons" class="buttons">
+    <button id="startBtn" type="button">Start Recording</button>
+    <button id="stopBtn" type="button" disabled>Stop Recording</button>
+  </div>
+
+  <div id="error" class="error" role="alert"></div>
+
+  <section id="sessionPanel" class="session-panel" aria-live="polite">
+    <div class="session-actions">
+      <button id="generateNotesBtn" type="button" class="hidden">Generate Notes</button>
+    </div>
+
+    <div id="notesBlock" class="notes-block">
+      <h2 id="notesTitle">SOAP Notes</h2>
+      <p id="notesSummary" class="notes-summary"></p>
+      <label for="notesContent">Clinical notes (SOAP)</label>
+      <textarea id="notesContent" placeholder="Generated SOAP notes will appear here…"></textarea>
+      <div class="session-actions">
+        <button id="saveNotesBtn" type="button" class="hidden">Save Notes</button>
+        <button id="startNewRecordingBtn" type="button" class="hidden">Start New Recording</button>
+        <button id="dismissSessionBtn" type="button" class="hidden">Dismiss</button>
+      </div>
+      <p id="saveStatus" class="save-status"></p>
+    </div>
+  </section>
+
+  <p class="hint">
+    Built for <strong>2-person</strong> calls. After recording, generate SOAP clinical notes with AI.
+  </p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

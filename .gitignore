@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Build / runtime
+dist/
+uploads/
+*.zip
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Extension dev artifacts
+extension-dist/
