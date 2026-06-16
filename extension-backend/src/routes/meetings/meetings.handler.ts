@@ -8,7 +8,7 @@ import {
   buildSoapNoteFromGeneratedJson,
 } from '~/lib/meeting-transcript'
 import prisma from '~/lib/prisma'
-import { transcribeAudioChunk } from '~/lib/transcription'
+import { transcribeAudioChunk, transcribeMeetingAudioFile } from '~/lib/transcription'
 import type { MEETING_ROUTES } from '~/routes/meetings/meetings.routes'
 import type { HandlerMapFromRoutes } from '~/types'
 
@@ -86,6 +86,45 @@ async function ensureUploadDir() {
   const uploadDir = Bun.env.UPLOAD_DIR ?? './uploads'
   await mkdir(uploadDir, { recursive: true })
   return uploadDir
+}
+
+async function ensureMeetingTranscript(meetingId: string, audioPath: string | null) {
+  const existing = await prisma.transcriptSegment.findMany({
+    where: { meetingId },
+    orderBy: { createdAt: 'asc' },
+  })
+
+  let transcript = buildMeetingTranscriptText(existing)
+  if (transcript.trim().length >= 20) {
+    return transcript
+  }
+
+  if (!audioPath) {
+    throw new HttpError(
+      'No transcript was saved and no audio file is available to transcribe.',
+      HttpStatusCodes.BAD_REQUEST,
+    )
+  }
+
+  const result = await transcribeMeetingAudioFile(audioPath)
+  if (!result.text) {
+    throw new HttpError(
+      'Could not transcribe the recording. Check OPENAI_API_KEY on the server.',
+      HttpStatusCodes.BAD_REQUEST,
+    )
+  }
+
+  await prisma.transcriptSegment.create({
+    data: {
+      meetingId,
+      text: result.text,
+      isFinal: true,
+      speaker: 'Recording',
+    },
+  })
+
+  transcript = result.text
+  return transcript
 }
 
 export const MEETING_ROUTE_HANDLER: HandlerMapFromRoutes<typeof MEETING_ROUTES> = {
@@ -289,14 +328,9 @@ export const MEETING_ROUTE_HANDLER: HandlerMapFromRoutes<typeof MEETING_ROUTES> 
 
   generate_notes: async c => {
     const { id } = c.req.valid('param')
-    await getMeetingOrThrow(id)
+    const meeting = await getMeetingOrThrow(id)
 
-    const segments = await prisma.transcriptSegment.findMany({
-      where: { meetingId: id },
-      orderBy: { createdAt: 'asc' },
-    })
-
-    const transcript = buildMeetingTranscriptText(segments)
+    const transcript = await ensureMeetingTranscript(id, meeting.audioPath)
     const { content: soapJson } = await generateClinicalNotesFromTranscript(
       transcript,
       undefined,

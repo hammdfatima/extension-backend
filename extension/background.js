@@ -114,8 +114,8 @@ async function syncRecordingToBackend(payload) {
   const segments =
     payload.segments?.length > 0
       ? payload.segments
-      : payload.conversation
-        ? [{ text: payload.conversation, isFinal: true }]
+      : payload.conversation?.trim()
+        ? [{ text: payload.conversation.trim(), isFinal: true, speaker: 'Recording' }]
         : [];
 
   if (segments.length > 0) {

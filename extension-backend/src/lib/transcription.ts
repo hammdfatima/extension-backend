@@ -44,6 +44,18 @@ export async function transcribeAudioChunk(
   return { text: '', source: 'demo' }
 }
 
+/** Transcribe a saved meeting audio file with OpenAI Whisper. */
+export async function transcribeMeetingAudioFile(audioPath: string): Promise<TranscriptionResult> {
+  const file = Bun.file(audioPath)
+  if (!(await file.exists())) {
+    return { text: '', source: 'openai' }
+  }
+
+  const buffer = await file.arrayBuffer()
+  const mimeType = audioPath.endsWith('.ogg') ? 'audio/ogg' : 'audio/webm'
+  return transcribeAudioChunk(buffer, mimeType)
+}
+
 export function generateNotesFromTranscript(segments: { text: string; speaker?: string | null }[]) {
   const fullText = segments.map(s => s.text).join(' ').trim()
 
