@@ -216,6 +216,7 @@ async function processStoppedRecording(payload) {
     meetingId = meeting.id;
 
     await uploadMeetingAudio(meetingId, payload.audioBuffer);
+    console.log('[background] uploaded audio bytes:', payload.audioBuffer.byteLength);
     await completeMeeting(meetingId);
 
     await setProcessingStage('generating');
@@ -260,6 +261,39 @@ async function processStoppedRecording(payload) {
     notifyPopup('processing-error', { error: backendError, session });
   }
 }
+
+/** Recover if the service worker restarted mid-upload (common when popup is closed). */
+async function recoverInterruptedProcessing() {
+  const { processing, pendingSession } = await chrome.storage.local.get([
+    'processing',
+    'pendingSession',
+  ]);
+
+  if (!processing || !pendingSession?.processingNotes || pendingSession?.note) {
+    return;
+  }
+
+  const session = {
+    ...pendingSession,
+    processingNotes: false,
+  };
+
+  await chrome.storage.local.set({
+    processing: false,
+    processingStage: null,
+    pendingSession: session,
+    syncError:
+      'Note generation was interrupted. Keep this popup open after stopping recording, and ensure you are online.',
+  });
+}
+
+recoverInterruptedProcessing();
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'processing-keepalive') {
+    port.onMessage.addListener(() => {});
+  }
+});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.target !== 'background') {
@@ -435,6 +469,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         };
         await chrome.storage.local.set({ pendingSession: session });
         return { ok: true, note: savedNote };
+      }
+
+      case 'retry-generate-notes': {
+        const { meetingId, filename } = message.data || {};
+        const stored = await chrome.storage.local.get('pendingSession');
+        const resolvedMeetingId = meetingId || stored.pendingSession?.meetingId;
+        const audio = pendingRecordingFiles?.audio;
+
+        if (!resolvedMeetingId || !audio?.buffer) {
+          return {
+            ok: false,
+            error: 'Cannot retry — record again and keep this popup open until notes appear.',
+          };
+        }
+
+        await chrome.storage.local.set({ processing: true, processingStage: 'generating', syncError: null });
+        void processStoppedRecording({ audioBuffer: audio.buffer, filename: filename || audio.filename });
+        return { ok: true };
       }
 
       case 'clear-session': {

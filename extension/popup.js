@@ -214,7 +214,7 @@ function showSession(session) {
     setNotesViewMode('empty');
     notesContentEl.classList.remove('hidden');
     setSaveStatus('');
-    setStatus('generating');
+    setStatus('idle', 'Recording saved — notes could not be generated');
   }
 
   updateSessionButtons();
@@ -254,6 +254,30 @@ function hideSession() {
   setSaveStatus('');
   updateSessionButtons();
   sendToBackground('clear-session').catch(() => {});
+}
+
+function formatServerError(message) {
+  const text = message || 'Could not generate notes. You can still download the recording.';
+
+  if (text.includes('Transcript is empty') || text.includes('No speech was detected')) {
+    return (
+      'No speech was captured in this recording. On the other computer: allow microphone, ' +
+      'reload the extension, record at least 10 seconds with clear speech, and keep the popup open after stopping.'
+    );
+  }
+
+  if (text.includes('too small')) {
+    return (
+      'Recording audio did not upload correctly. Reload the extension from the latest zip, ' +
+      'then record again for at least 10 seconds.'
+    );
+  }
+
+  if (text.includes('Could not reach the server')) {
+    return text;
+  }
+
+  return `Server sync failed: ${text}`;
 }
 
 function showError(text) {
@@ -299,6 +323,26 @@ async function getTabStreamId(tabId, allowRetry = true) {
 /** @type {number | null} */
 let processingWatchdogId = null;
 
+/** @type {chrome.runtime.Port | null} */
+let processingKeepAlivePort = null;
+
+function startProcessingKeepAlive() {
+  stopProcessingKeepAlive();
+  try {
+    processingKeepAlivePort = chrome.runtime.connect({ name: 'processing-keepalive' });
+    processingKeepAlivePort.onDisconnect.addListener(() => {
+      processingKeepAlivePort = null;
+    });
+  } catch {
+    processingKeepAlivePort = null;
+  }
+}
+
+function stopProcessingKeepAlive() {
+  processingKeepAlivePort?.disconnect();
+  processingKeepAlivePort = null;
+}
+
 function clearProcessingWatchdog() {
   if (processingWatchdogId !== null) {
     clearInterval(processingWatchdogId);
@@ -311,26 +355,50 @@ function startProcessingWatchdog() {
   const startedAt = Date.now();
 
   processingWatchdogId = window.setInterval(() => {
-    chrome.storage.local.get(['processing', 'pendingSession'], ({ processing, pendingSession }) => {
-      if (!processing || pendingSession?.meetingId) {
-        clearProcessingWatchdog();
-        return;
-      }
+    chrome.storage.local.get(
+      ['processing', 'pendingSession', 'syncError'],
+      ({ processing, pendingSession, syncError }) => {
+        if (pendingSession?.note) {
+          clearProcessingWatchdog();
+          stopProcessingKeepAlive();
+          return;
+        }
 
-      const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
-      if (elapsedSec >= 20 && elapsedSec < 120) {
-        setStatus('generating', `Generating SOAP notes… (${elapsedSec}s)`);
-      }
+        const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
 
-      if (elapsedSec >= 120) {
-        clearProcessingWatchdog();
-        setStatus('idle');
-        showError(
-          'Processing is taking too long. Keep this popup open and click Stop Recording again, or reload the extension.'
-        );
-        chrome.storage.local.set({ processing: false, processingStage: null });
+        if (processing && elapsedSec >= 15 && elapsedSec < 180) {
+          setStatus(
+            'generating',
+            `Generating SOAP notes… (${elapsedSec}s — keep this popup open)`
+          );
+        }
+
+        const stuck = !processing && pendingSession?.processingNotes && !pendingSession?.note;
+        if (stuck || elapsedSec >= 180) {
+          clearProcessingWatchdog();
+          stopProcessingKeepAlive();
+
+          const errorMessage =
+            syncError ||
+            'Could not reach the server or generation timed out. Check your internet connection, then try again.';
+
+          if (pendingSession) {
+            showSession({ ...pendingSession, processingNotes: false });
+          }
+
+          setStatus('idle');
+          showError(errorMessage);
+          chrome.storage.local.set({
+            processing: false,
+            processingStage: null,
+            syncError: errorMessage,
+            pendingSession: pendingSession
+              ? { ...pendingSession, processingNotes: false }
+              : pendingSession,
+          });
+        }
       }
-    });
+    );
   }, 5000);
 }
 
@@ -339,9 +407,20 @@ function restoreFromStorage() {
     ['recording', 'pendingSession', 'processing', 'processingStage', 'syncError'],
     ({ recording, pendingSession, processing, processingStage, syncError }) => {
       if (pendingSession?.files || pendingSession?.meetingId || pendingSession?.processingNotes) {
+        if (pendingSession.processingNotes && !processing && !pendingSession.note) {
+          showSession({ ...pendingSession, processingNotes: false });
+          setStatus('idle');
+          showError(formatServerError(syncError));
+          return;
+        }
+
         showSession(pendingSession);
         if (pendingSession.processingNotes || processing) {
+          startProcessingKeepAlive();
           startProcessingWatchdog();
+        }
+        if (syncError && !pendingSession.processingNotes) {
+          showError(formatServerError(syncError));
         }
         return;
       }
@@ -527,6 +606,7 @@ async function stopRecording() {
     };
 
     showSession(session);
+    startProcessingKeepAlive();
     startProcessingWatchdog();
   } catch (err) {
     console.error('[popup] stopRecording failed:', err);
@@ -535,6 +615,7 @@ async function stopRecording() {
     await chrome.storage.local.set({ recording: false, processing: false, processingStage: null });
     await chrome.storage.session.set({ recordingState: 'idle' });
     clearProcessingWatchdog();
+    stopProcessingKeepAlive();
   } finally {
     startBtn.disabled = ['recording', 'saving', 'syncing', 'generating'].includes(uiState);
     stopBtn.disabled = uiState !== 'recording';
@@ -632,6 +713,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.pendingSession?.newValue) {
     if (changes.pendingSession.newValue.files || changes.pendingSession.newValue.meetingId) {
       clearProcessingWatchdog();
+      stopProcessingKeepAlive();
       showSession(changes.pendingSession.newValue);
     }
   }
@@ -651,8 +733,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 
   if (changes.syncError?.newValue) {
-    setStatus('idle');
-    showError(`Server sync failed: ${changes.syncError.newValue}`);
+    setStatus('idle', 'Could not generate notes');
+    showError(formatServerError(changes.syncError.newValue));
   }
 
   if (changes.micPermissionReady?.newValue === true && changes.pendingStartRecording?.newValue === true) {
@@ -692,21 +774,25 @@ chrome.runtime.onMessage.addListener((message) => {
       processingNotes: true,
       files: message.data.files,
     });
+    startProcessingKeepAlive();
     startProcessingWatchdog();
   }
 
   if (message.type === 'processing-error') {
     clearProcessingWatchdog();
+    stopProcessingKeepAlive();
     if (message.data?.session) {
       showSession(message.data.session);
     }
-    showError(message.data?.error || 'Could not generate notes. You can still download the recording.');
+    setStatus('idle', 'Could not generate notes');
+    showError(formatServerError(message.data?.error));
   }
 
   if (message.type === 'notes-ready' && message.data) {
     currentSession = message.data;
     showSession(message.data);
     clearProcessingWatchdog();
+    stopProcessingKeepAlive();
   }
 
   if (message.type === 'transcript-ready' && message.data?.files && currentSession) {

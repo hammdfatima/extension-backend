@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import * as HttpStatusCodes from 'stoker/http-status-codes'
 import { HttpError } from '~/lib/error'
 import { generateClinicalNotesFromTranscript } from '~/lib/generate-clinical-notes'
@@ -83,9 +83,23 @@ async function getMeetingOrThrow(id: string) {
 }
 
 async function ensureUploadDir() {
-  const uploadDir = Bun.env.UPLOAD_DIR ?? './uploads'
+  const uploadDir = resolve(process.cwd(), Bun.env.UPLOAD_DIR ?? './uploads')
   await mkdir(uploadDir, { recursive: true })
   return uploadDir
+}
+
+function isUsableTranscript(text: string) {
+  const trimmed = text.trim()
+  if (trimmed.length < 20) {
+    return false
+  }
+  if (trimmed.includes('Transcript is being generated on the server')) {
+    return false
+  }
+  if (trimmed.includes('No speech detected in this recording')) {
+    return false
+  }
+  return true
 }
 
 async function ensureMeetingTranscript(meetingId: string, audioPath: string | null) {
@@ -94,9 +108,9 @@ async function ensureMeetingTranscript(meetingId: string, audioPath: string | nu
     orderBy: { createdAt: 'asc' },
   })
 
-  let transcript = buildMeetingTranscriptText(existing)
-  if (transcript.trim().length >= 20) {
-    return transcript
+  const transcript = buildMeetingTranscriptText(existing)
+  if (isUsableTranscript(transcript)) {
+    return transcript.trim()
   }
 
   if (!audioPath) {
@@ -372,6 +386,13 @@ export const MEETING_ROUTE_HANDLER: HandlerMapFromRoutes<typeof MEETING_ROUTES> 
     const fileName = `${id}.${extension}`
     const filePath = join(uploadDir, fileName)
     const audioBuffer = await c.req.arrayBuffer()
+    if (audioBuffer.byteLength < 1024) {
+      throw new HttpError(
+        `Recording upload is too small (${audioBuffer.byteLength} bytes). The extension may not have captured audio — reload the extension, allow microphone, and record for at least 10 seconds.`,
+        HttpStatusCodes.BAD_REQUEST,
+      )
+    }
+
     await Bun.write(filePath, audioBuffer)
 
     const meeting = await prisma.meeting.update({

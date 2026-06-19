@@ -57,7 +57,13 @@ async function apiRequest(path, options = {}) {
 
       if (isAbort) {
         throw new Error(
-          'Server request timed out. The backend may be waking up — wait a moment and try again.'
+          'Could not reach the server. Check your internet connection and try again.'
+        );
+      }
+
+      if (isNetwork) {
+        throw new Error(
+          'Could not reach the server. Check your internet connection and try again.'
         );
       }
 

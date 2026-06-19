@@ -17,7 +17,9 @@ export async function generateClinicalNotesFromTranscript(
 
   const trimmed = transcript.trim()
   if (!trimmed) {
-    throw new Error('Transcript is empty; cannot generate clinical notes')
+    throw new Error(
+      'No speech was detected in this recording. Allow microphone access, speak during the visit, and record for at least 10 seconds.',
+    )
   }
 
   const model = Bun.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini'
