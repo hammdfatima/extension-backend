@@ -106,25 +106,25 @@ async function ensureMeetingTranscript(meetingId: string, audioPath: string | nu
     )
   }
 
-  const result = await transcribeMeetingAudioFile(audioPath)
-  if (!result.text) {
+  try {
+    const result = await transcribeMeetingAudioFile(audioPath)
+
+    await prisma.transcriptSegment.create({
+      data: {
+        meetingId,
+        text: result.text,
+        isFinal: true,
+        speaker: 'Recording',
+      },
+    })
+
+    return result.text
+  } catch (err) {
     throw new HttpError(
-      'Could not transcribe the recording. Check OPENAI_API_KEY on the server.',
+      err instanceof Error ? err.message : 'Could not transcribe the recording.',
       HttpStatusCodes.BAD_REQUEST,
     )
   }
-
-  await prisma.transcriptSegment.create({
-    data: {
-      meetingId,
-      text: result.text,
-      isFinal: true,
-      speaker: 'Recording',
-    },
-  })
-
-  transcript = result.text
-  return transcript
 }
 
 export const MEETING_ROUTE_HANDLER: HandlerMapFromRoutes<typeof MEETING_ROUTES> = {
@@ -328,9 +328,10 @@ export const MEETING_ROUTE_HANDLER: HandlerMapFromRoutes<typeof MEETING_ROUTES> 
 
   generate_notes: async c => {
     const { id } = c.req.valid('param')
-    const meeting = await getMeetingOrThrow(id)
+    await getMeetingOrThrow(id)
 
-    const transcript = await ensureMeetingTranscript(id, meeting.audioPath)
+    const meeting = await prisma.meeting.findUnique({ where: { id } })
+    const transcript = await ensureMeetingTranscript(id, meeting?.audioPath ?? null)
     const { content: soapJson } = await generateClinicalNotesFromTranscript(
       transcript,
       undefined,

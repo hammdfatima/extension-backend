@@ -1,25 +1,14 @@
 /**
  * MV3 Service Worker — orchestrates the offscreen document and routes messages.
- *
- * WHY NO MEDIA HERE?
- * Service workers have no DOM, no AudioContext, and no stable MediaStream APIs.
- * Chrome may suspend them at any time. All capture/recording runs in offscreen.html.
- *
- * DEPRECATED PATTERN WE AVOID:
- * - chrome.tabCapture.capture(callback) — MV2-style; returns MediaStream in the caller
- *   context, which service workers cannot hold. Replaced by getMediaStreamId (Chrome 116+)
- *   plus getUserMedia in an offscreen document.
- * - Opening a visible extension window solely for getUserMedia — replaced by offscreen docs.
  */
 
 importScripts('config.js', 'api.js');
 
 const OFFSCREEN_URL = 'offscreen.html';
 
-/**
- * Ensure the offscreen document exists before sending media commands.
- * Reason USER_MEDIA is required for tabCapture stream redemption + microphone access.
- */
+/** @type {{ audio?: { buffer: ArrayBuffer, filename: string }, text?: { text: string, filename: string } } | null} */
+let pendingRecordingFiles = null;
+
 async function ensureOffscreenDocument() {
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT'],
@@ -37,9 +26,6 @@ async function ensureOffscreenDocument() {
   });
 }
 
-/**
- * Close the offscreen document when recording is finished to free resources.
- */
 async function closeOffscreenDocument() {
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT'],
@@ -51,33 +37,106 @@ async function closeOffscreenDocument() {
   }
 }
 
-/**
- * Forward a message to the offscreen document and await its response.
- * @param {string} type
- * @param {unknown} [data]
- */
 function sendToOffscreen(type, data) {
   return chrome.runtime.sendMessage({ type, target: 'offscreen', data });
 }
 
-/**
- * Save a file via chrome.downloads (service worker only — not available offscreen).
- * @param {string} dataUrl
- * @param {string} filename
- * @param {boolean} [saveAs]
- */
-async function downloadFile(dataUrl, filename, saveAs = false) {
-  await chrome.downloads.download({
-    url: dataUrl,
-    filename,
-    saveAs,
-  });
+function buildTranscriptFileFromSegments(segments, filename) {
+  const timestamp = filename?.replace(/^recording-|\.webm$/g, '') || new Date().toISOString();
+  const header = `Tab + Mic Recorder — 2-Person Conversation\nRecorded: ${timestamp}\n`;
+  const legend = `Speakers: Doctor = microphone | Patient = call/tab audio\n${'='.repeat(50)}\n\n`;
+
+  const body =
+    segments?.length > 0
+      ? segments
+          .map((segment) => {
+            const speaker = segment.speaker || 'Speaker';
+            return `[${speaker}] ${segment.text}`;
+          })
+          .join('\n\n')
+      : '(No speech detected in this recording.)';
+
+  return `${header}${legend}${body}`;
 }
 
-/**
- * Convert a data URL to an ArrayBuffer for API upload.
- * @param {string} dataUrl
- */
+function isPlaceholderTranscript(text) {
+  return (
+    !text ||
+    text.includes('Transcript is being generated on the server') ||
+    text.includes('(No speech detected in this recording.)')
+  );
+}
+
+async function refreshTranscriptFile(meetingId, filename) {
+  try {
+    const meeting = await getMeeting(meetingId);
+    const segments = meeting?.segments || [];
+    if (!segments.length) {
+      return;
+    }
+
+    const transcriptText = buildTranscriptFileFromSegments(segments, filename);
+    const textFilename = filename?.replace(/\.webm$/, '.txt') || 'recording.txt';
+
+    pendingRecordingFiles = {
+      ...pendingRecordingFiles,
+      text: { text: transcriptText, filename: textFilename },
+    };
+
+    const stored = await chrome.storage.local.get('pendingSession');
+    if (stored.pendingSession) {
+      await chrome.storage.local.set({
+        pendingSession: {
+          ...stored.pendingSession,
+          files: buildSessionFilesMeta(),
+        },
+      });
+    }
+
+    notifyPopup('transcript-ready', { files: buildSessionFilesMeta() });
+  } catch (err) {
+    console.warn('[background] refreshTranscriptFile failed:', err);
+  }
+}
+
+async function resolveTranscriptText() {
+  const file = pendingRecordingFiles?.text;
+  if (!file?.text) {
+    return null;
+  }
+
+  if (!isPlaceholderTranscript(file.text)) {
+    return { text: file.text, filename: file.filename };
+  }
+
+  const { pendingSession } = await chrome.storage.local.get('pendingSession');
+  if (!pendingSession?.meetingId) {
+    return { text: file.text, filename: file.filename };
+  }
+
+  const meeting = await getMeeting(pendingSession.meetingId);
+  const segments = meeting?.segments || [];
+  if (!segments.length) {
+    return { text: file.text, filename: file.filename };
+  }
+
+  const transcriptText = buildTranscriptFileFromSegments(
+    segments,
+    pendingRecordingFiles?.audio?.filename || 'recording.webm'
+  );
+
+  pendingRecordingFiles = {
+    ...pendingRecordingFiles,
+    text: { text: transcriptText, filename: file.filename },
+  };
+
+  return { text: transcriptText, filename: file.filename };
+}
+
+function notifyPopup(type, data) {
+  chrome.runtime.sendMessage({ type, target: 'popup', data }).catch(() => {});
+}
+
 function dataUrlToArrayBuffer(dataUrl) {
   const base64 = dataUrl.split(',')[1];
   const binary = atob(base64);
@@ -88,54 +147,118 @@ function dataUrlToArrayBuffer(dataUrl) {
   return bytes.buffer;
 }
 
-/**
- * Relay a message to the popup (if open). Fire-and-forget.
- * @param {string} type
- * @param {unknown} [data]
- */
-function notifyPopup(type, data) {
-  chrome.runtime.sendMessage({ type, target: 'popup', data }).catch(() => {
-    // Popup may be closed; ignore "Receiving end does not exist".
-  });
+function arrayBufferFromAudioResult(result) {
+  if (result?.audioDataUrl) {
+    return dataUrlToArrayBuffer(result.audioDataUrl);
+  }
+  if (result?.audioBuffer instanceof ArrayBuffer) {
+    return result.audioBuffer.slice(0);
+  }
+  return null;
+}
+
+function buildSessionFilesMeta() {
+  return {
+    hasAudio: Boolean(pendingRecordingFiles?.audio),
+    hasText: Boolean(pendingRecordingFiles?.text),
+    audioFilename: pendingRecordingFiles?.audio?.filename ?? null,
+    textFilename: pendingRecordingFiles?.text?.filename ?? null,
+  };
+}
+
+async function getRecordingState() {
+  const { recordingState = 'idle' } = await chrome.storage.session.get('recordingState');
+  return recordingState;
+}
+
+async function setRecordingState(state) {
+  await chrome.storage.session.set({ recordingState: state });
+}
+
+async function setProcessingStage(stage) {
+  await chrome.storage.local.set({ processingStage: stage });
+}
+
+async function releaseTabCapture() {
+  try {
+    await ensureOffscreenDocument();
+    await sendToOffscreen('force-cleanup');
+  } catch {
+    // Offscreen may be unavailable — still close the document below.
+  }
+
+  try {
+    await closeOffscreenDocument();
+  } catch {
+    // ignore
+  }
+
+  pendingRecordingFiles = null;
+  await setRecordingState('idle');
+  await chrome.storage.local.set({ recording: false, processing: false });
 }
 
 /**
- * Persist transcript + audio to the backend (notes generated on demand).
- * @param {{
- *   dataUrl: string,
- *   segments: Array<{ text: string, speaker?: string, startMs?: number, isFinal?: boolean }>,
- *   conversation: string,
- *   filename: string,
- * }} payload
+ * Upload audio and generate SOAP notes on the server (runs after popup is shown).
+ * @param {{ audioBuffer: ArrayBuffer, filename: string }} payload
  */
-async function syncRecordingToBackend(payload) {
-  const meeting = await createMeeting(payload.filename.replace(/\.webm$/, ''));
+async function processStoppedRecording(payload) {
+  let meetingId = null;
+  let note = null;
 
-  const segments =
-    payload.segments?.length > 0
-      ? payload.segments
-      : payload.conversation?.trim()
-        ? [{ text: payload.conversation.trim(), isFinal: true, speaker: 'Recording' }]
-        : [];
+  try {
+    await setProcessingStage('uploading');
+    notifyPopup('sync-status', { stage: 'uploading' });
 
-  if (segments.length > 0) {
-    await saveTranscriptSegments(meeting.id, segments);
+    await wakeBackend().catch(() => {});
+
+    const meeting = await createMeeting(payload.filename.replace(/\.webm$/, ''));
+    meetingId = meeting.id;
+
+    await uploadMeetingAudio(meetingId, payload.audioBuffer);
+    await completeMeeting(meetingId);
+
+    await setProcessingStage('generating');
+    notifyPopup('sync-status', { stage: 'generating' });
+
+    note = await generateMeetingNotes(meetingId);
+    await refreshTranscriptFile(meetingId, payload.filename);
+
+    const session = {
+      meetingId,
+      note,
+      notesSaved: false,
+      processingNotes: false,
+      files: buildSessionFilesMeta(),
+    };
+
+    await chrome.storage.local.set({
+      pendingSession: session,
+      processing: false,
+      processingStage: null,
+      syncError: null,
+    });
+    notifyPopup('notes-ready', session);
+  } catch (err) {
+    const backendError = err instanceof Error ? err.message : String(err);
+    console.error('[background] processStoppedRecording failed:', err);
+
+    const session = {
+      meetingId,
+      note: null,
+      notesSaved: false,
+      processingNotes: false,
+      files: buildSessionFilesMeta(),
+    };
+
+    await chrome.storage.local.set({
+      pendingSession: session,
+      processing: false,
+      processingStage: null,
+      syncError: backendError,
+    });
+    notifyPopup('processing-error', { error: backendError, session });
   }
-
-  const audioBuffer = dataUrlToArrayBuffer(payload.dataUrl);
-  await uploadMeetingAudio(meeting.id, audioBuffer);
-  await completeMeeting(meeting.id);
-
-  const session = { meetingId: meeting.id, note: null };
-  await chrome.storage.local.set({
-    pendingSession: session,
-    processing: false,
-    syncError: null,
-    recording: false,
-  });
-  notifyPopup('session-ready', session);
-
-  return { meetingId: meeting.id };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -146,79 +269,154 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const handle = async () => {
     switch (message.type) {
       case 'start-recording': {
-        await ensureOffscreenDocument();
-        const result = await sendToOffscreen('start-recording', message.data);
-        return result;
+        pendingRecordingFiles = null;
+
+        const state = await getRecordingState();
+        if (state === 'starting' || state === 'recording' || state === 'stopping') {
+          return { ok: false, error: 'Recording is already in progress. Click Stop Recording first.' };
+        }
+
+        await setRecordingState('starting');
+
+        try {
+          await ensureOffscreenDocument();
+          const result = await sendToOffscreen('start-recording', message.data);
+
+          if (result?.ok) {
+            await setRecordingState('recording');
+            await chrome.storage.local.set({ recording: true, processing: false, syncError: null });
+            wakeBackend().catch(() => {});
+          } else {
+            await setRecordingState('idle');
+          }
+
+          return result;
+        } catch (err) {
+          await setRecordingState('idle');
+          throw err;
+        }
+      }
+
+      case 'release-tab-capture': {
+        await releaseTabCapture();
+        return { ok: true };
       }
 
       case 'stop-recording': {
-        let result;
-        let backendError = null;
-        let backendResult = null;
+        const state = await getRecordingState();
+        if (state === 'starting') {
+          return { ok: false, error: 'Recording is still starting. Wait a moment and try again.' };
+        }
 
+        await setRecordingState('stopping');
+
+        let result;
+        let audioBuffer = null;
         try {
           result = await sendToOffscreen('stop-recording');
-
           if (result?.ok) {
-            // Popup often closes when the Save As dialog opens — persist state here.
-            await chrome.storage.local.set({ recording: false, processing: true });
-            notifyPopup('sync-status', { stage: 'syncing' });
-          }
-
-          if (result?.ok && result.dataUrl && result.filename) {
-            await downloadFile(result.dataUrl, result.filename, true);
-          }
-          if (result?.ok && result.textDataUrl && result.textFilename) {
-            await downloadFile(result.textDataUrl, result.textFilename, false);
-          }
-
-          if (result?.ok && result.dataUrl) {
-            try {
-              backendResult = await syncRecordingToBackend({
-                dataUrl: result.dataUrl,
-                segments: result.segments || [],
-                conversation: result.conversation || '',
-                filename: result.filename,
-              });
-            } catch (err) {
-              backendError = err instanceof Error ? err.message : String(err);
-              console.error('[background] backend sync failed:', err);
-              await chrome.storage.local.set({
-                processing: false,
-                syncError: backendError,
-              });
+            audioBuffer = arrayBufferFromAudioResult(result);
+            if (!audioBuffer || audioBuffer.byteLength < 1024) {
+              return {
+                ok: false,
+                error:
+                  'Recording audio was empty or corrupted. Record for at least a few seconds and try again.',
+              };
             }
           }
         } finally {
-          await closeOffscreenDocument();
-          if (!backendResult && !backendError) {
-            await chrome.storage.local.set({ processing: false });
+          try {
+            await sendToOffscreen('force-cleanup');
+          } catch {
+            // ignore
           }
+          await closeOffscreenDocument();
+          await setRecordingState('idle');
+        }
+
+        if (!result?.ok) {
+          await chrome.storage.local.set({ recording: false, processing: false });
+          return result;
+        }
+
+        pendingRecordingFiles = {
+          audio: audioBuffer && result.filename
+            ? { buffer: audioBuffer, filename: result.filename }
+            : undefined,
+          text: result.transcriptText && result.textFilename
+            ? { text: result.transcriptText, filename: result.textFilename }
+            : undefined,
+        };
+
+        const files = buildSessionFilesMeta();
+        const initialSession = {
+          meetingId: null,
+          note: null,
+          notesSaved: false,
+          processingNotes: true,
+          files,
+        };
+
+        await chrome.storage.local.set({
+          recording: false,
+          processing: true,
+          processingStage: 'uploading',
+          pendingSession: initialSession,
+        });
+
+        notifyPopup('session-processing', { files });
+
+        void processStoppedRecording({
+          audioBuffer,
+          filename: result.filename,
+        });
+
+        return { ok: true, files, processing: true };
+      }
+
+      case 'download-recording-file': {
+        const fileType = message.data?.fileType;
+
+        if (fileType === 'text') {
+          const resolved = await resolveTranscriptText();
+          if (!resolved?.text || !resolved?.filename) {
+            return {
+              ok: false,
+              error: 'Transcript is not ready yet. Wait for notes to finish generating.',
+            };
+          }
+
+          if (isPlaceholderTranscript(resolved.text)) {
+            return {
+              ok: false,
+              error: 'Transcript is empty. The server could not transcribe this recording.',
+            };
+          }
+
+          return {
+            ok: true,
+            filename: resolved.filename,
+            text: resolved.text,
+            mimeType: 'text/plain;charset=utf-8',
+          };
+        }
+
+        const file = pendingRecordingFiles?.audio;
+        if (!file?.buffer || !file?.filename) {
+          return { ok: false, error: 'Recording file is no longer available. Record again to download.' };
         }
 
         return {
-          ...result,
-          backendError,
-          meetingId: backendResult?.meetingId ?? null,
+          ok: true,
+          filename: file.filename,
+          audioBuffer: file.buffer,
+          mimeType: 'audio/webm',
+          saveAs: true,
         };
       }
 
-      case 'generate-notes': {
-        const { meetingId } = message.data || {};
-        if (!meetingId) {
-          return { ok: false, error: 'Meeting ID is required.' };
-        }
-
-        const note = await generateMeetingNotes(meetingId);
-        const stored = await chrome.storage.local.get('pendingSession');
-        const session = {
-          meetingId,
-          note,
-          notesSaved: false,
-        };
-        await chrome.storage.local.set({ pendingSession: session });
-        notifyPopup('notes-ready', session);
-        return { ok: true, note };
+      case 'has-recording-files': {
+        return { ok: true, files: buildSessionFilesMeta() };
       }
 
       case 'save-note': {
@@ -227,14 +425,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return { ok: false, error: 'Meeting ID and note content are required.' };
         }
 
-        const note = await saveMeetingNote(meetingId, { title, summary, content });
+        const savedNote = await saveMeetingNote(meetingId, { title, summary, content });
+        const stored = await chrome.storage.local.get('pendingSession');
         const session = {
           meetingId,
-          note,
+          note: savedNote,
           notesSaved: true,
+          files: stored.pendingSession?.files ?? buildSessionFilesMeta(),
         };
         await chrome.storage.local.set({ pendingSession: session });
-        return { ok: true, note };
+        return { ok: true, note: savedNote };
+      }
+
+      case 'clear-session': {
+        pendingRecordingFiles = null;
+        await chrome.storage.local.remove(['pendingSession', 'syncError', 'processingStage']);
+        await chrome.storage.local.set({ processing: false });
+        return { ok: true };
       }
 
       default:
@@ -257,6 +464,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 chrome.runtime.onMessage.addListener((message) => {
   if (message.target === 'background' && message.type === 'offscreen-error') {
     notifyPopup('recording-error', message.data);
-    chrome.storage.local.set({ recording: false });
+    chrome.storage.local.set({ recording: false, processing: false });
+    chrome.storage.session.set({ recordingState: 'idle' });
   }
 });

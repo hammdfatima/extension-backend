@@ -205,9 +205,9 @@ async function transcribeConversation(micBlob, tabBlob) {
 function formatTranscriptFile(conversation, timestamp) {
   const header = `Tab + Mic Recorder — 2-Person Conversation\nRecorded: ${timestamp}\n`;
   const legend = `Speakers: ${SPEAKER_DOCTOR} = microphone | ${SPEAKER_PATIENT} = call/tab audio\n${'='.repeat(50)}\n\n`;
-  const body = conversation || '(No speech detected in this recording.)';
+  const body = conversation || '(Transcript is being generated on the server.)';
   const footer =
-    '\n\n---\nTranscribed with on-device Whisper. Internet required on first use to download the speech model.';
+    '\n\n---\nTranscript generated on the server after upload.';
   return header + legend + body + footer;
 }
 
@@ -316,12 +316,15 @@ async function getMicrophoneStream() {
     const name = err instanceof DOMException ? err.name : 'Error';
     if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
       throw new Error(
-        'Microphone permission denied. Click Start again and choose Allow when prompted, ' +
-          'or reset mic access for this extension in chrome://settings/content/microphone.'
+        'Microphone permission denied in the recorder. Close and reopen the extension popup, ' +
+          'click Start Recording, then Allow in the Chrome dialog.'
       );
     }
     if (name === 'NotFoundError') {
       throw new Error('No microphone found. Connect a mic and try again.');
+    }
+    if (name === 'NotReadableError') {
+      throw new Error('Microphone is in use by another app. Close other apps and try again.');
     }
     throw new Error(`Microphone error: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -439,7 +442,7 @@ function blobToDataUrl(blob) {
 }
 
 /**
- * Stop recording, transcribe each source, and return audio + conversation text.
+ * Stop recording and return audio immediately — transcription runs on the server.
  */
 async function stopRecording() {
   if (!isRecording || !mediaRecorder) {
@@ -448,33 +451,38 @@ async function stopRecording() {
   }
 
   try {
-    const [mixedBlob, micBlob, tabBlob] = await Promise.all([
-      finalizeRecorder(mediaRecorder, recordedChunks, MIME_TYPE),
-      finalizeRecorder(micRecorder, micRecordedChunks, MIME_TYPE),
-      finalizeRecorder(tabRecorder, tabRecordedChunks, MIME_TYPE),
-    ]);
+    const mixedBlob = await finalizeRecorder(mediaRecorder, recordedChunks, MIME_TYPE);
+
+    if (micRecorder?.state !== 'inactive') {
+      try {
+        micRecorder.stop();
+      } catch {
+        // ignore
+      }
+    }
+    if (tabRecorder?.state !== 'inactive') {
+      try {
+        tabRecorder.stop();
+      } catch {
+        // ignore
+      }
+    }
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `recording-${timestamp}.webm`;
     const textFilename = `recording-${timestamp}.txt`;
-
-    const { conversation, segments } = await transcribeConversation(micBlob, tabBlob);
-    const transcriptText = formatTranscriptFile(conversation, timestamp);
-
-    const dataUrl = await blobToDataUrl(mixedBlob);
-    const textDataUrl = await blobToDataUrl(
-      new Blob([transcriptText], { type: 'text/plain;charset=utf-8' })
-    );
+    const transcriptText = formatTranscriptFile('', timestamp);
+    const audioDataUrl = await blobToDataUrl(mixedBlob);
 
     await cleanup();
     return {
       ok: true,
       filename,
-      dataUrl,
+      audioDataUrl,
       textFilename,
-      textDataUrl,
-      segments,
-      conversation,
+      transcriptText,
+      segments: [],
+      conversation: '',
     };
   } catch (err) {
     await cleanup();
@@ -492,6 +500,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     switch (message.type) {
       case 'start-recording':
         return startRecording(message.data);
+      case 'force-cleanup':
+        await cleanup();
+        return { ok: true };
       case 'stop-recording':
         return stopRecording();
       default:
